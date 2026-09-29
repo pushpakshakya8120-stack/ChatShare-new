@@ -215,10 +215,10 @@ drop policy if exists messages_update on messages;
 create policy messages_update on messages for update to authenticated using (sender_id = auth.uid());
 
 drop policy if exists notifications_select on notifications;
-create policy notifications_select on notifications for select to authenticated using (auth.uid() = user_id);
+create policy notifications_select on notifications for select to authenticated using (user_id = auth.uid());
 
 drop policy if exists notifications_update on notifications;
-create policy notifications_update on notifications for update to authenticated using (auth.uid() = user_id);
+create policy notifications_update on notifications for update to authenticated using (user_id = auth.uid());
 
 drop policy if exists stories_select on stories;
 create policy stories_select on stories for select to authenticated using (expires_at > now());
@@ -294,3 +294,93 @@ from auth.users
 where email='pushpakshakya8120@gmail.com'
 on conflict(id) do update set is_master=true;
 
+cat > .env.example <<'ENV'
+VITE_SUPABASE_URL=YOUR_SUPABASE_PROJECT_URL
+VITE_SUPABASE_ANON_KEY=YOUR_SUPABASE_ANON_KEY
+ENV
+
+cat > src/services/chatshare.js <<'JS'
+import { createClient } from "@supabase/supabase-js";
+
+const url = import.meta.env.VITE_SUPABASE_URL;
+const key = import.meta.env.VITE_SUPABASE_ANON_KEY;
+
+export const supabase = url && key ? createClient(url,key) : null;
+
+export async function sendEmailOtp(email){
+  if(!supabase) throw new Error("Supabase is not configured.");
+  return supabase.auth.signInWithOtp({
+    email: email.trim(),
+    options:{shouldCreateUser:true}
+  });
+}
+
+export async function verifyEmailOtp(email,token){
+  if(!supabase) throw new Error("Supabase is not configured.");
+  return supabase.auth.verifyOtp({
+    email:email.trim(),
+    token,
+    type:"email"
+  });
+}
+
+export async function getProfile(userId){
+  if(!supabase) return {data:null,error:null};
+  return supabase.from("profiles").select("*").eq("id",userId).maybeSingle();
+}
+
+export async function saveProfile(profile){
+  if(!supabase) throw new Error("Supabase is not configured.");
+  return supabase.from("profiles").upsert(profile,{onConflict:"id"});
+}
+
+export function subscribeToTable(table,callback){
+  if(!supabase) return ()=>{};
+  const channel=supabase.channel(`chatshare-${table}-${Date.now()}`)
+    .on("postgres_changes",{event:"*",schema:"public",table},callback)
+    .subscribe();
+  return ()=>supabase.removeChannel(channel);
+}
+JS
+
+cat > src/features.js <<'JS'
+export const CHATSHARE_FEATURES = {
+  auth: ["email verification OTP","existing account recovery","profile setup","secure logout"],
+  social: ["posts","likes","comments","followers","following","profile","search"],
+  messaging: ["real-time conversations","real-time messages","normal media","view-once media"],
+  discovery: ["stories","reels","notifications"],
+  account: ["settings","subscriptions","monthly plan","six-month plan"],
+  administration: ["single master account","normal moderation access","view-once media excluded"]
+};
+JS
+
+echo "CHATSHARE REMAINING FOUNDATION CREATED — NO BUILD RUN"
+
+create table if not exists public.blocks(id uuid primary key default gen_random_uuid(),blocker_id uuid not null references auth.users(id) on delete cascade,blocked_id uuid not null references auth.users(id) on delete cascade,created_at timestamptz default now(),unique(blocker_id,blocked_id));
+alter table public.blocks enable row level security;
+create policy "block own" on public.blocks for all using(auth.uid()=blocker_id) with check(auth.uid()=blocker_id);
+alter table public.notifications add column if not exists actor_id uuid references auth.users(id);
+
+create table if not exists public.blocks(id uuid primary key default gen_random_uuid(),blocker_id uuid references auth.users(id) on delete cascade,blocked_id uuid references auth.users(id) on delete cascade,created_at timestamptz default now(),unique(blocker_id,blocked_id));
+create table if not exists public.call_logs(id uuid primary key default gen_random_uuid(),caller_id uuid references auth.users(id),receiver_id uuid references auth.users(id),call_type text check(call_type in('voice','video')),status text default 'ended',started_at timestamptz default now(),ended_at timestamptz);
+create table if not exists public.message_media(id uuid primary key default gen_random_uuid(),message_id uuid references public.messages(id) on delete cascade,media_url text not null,media_type text,view_once boolean default false,expires_at timestamptz);
+create table if not exists public.story_views(id uuid primary key default gen_random_uuid(),story_id uuid references public.stories(id) on delete cascade,viewer_id uuid references auth.users(id) on delete cascade,viewed_at timestamptz default now(),unique(story_id,viewer_id));
+create table if not exists public.story_reactions(id uuid primary key default gen_random_uuid(),story_id uuid references public.stories(id) on delete cascade,user_id uuid references auth.users(id) on delete cascade,reaction text,created_at timestamptz default now(),unique(story_id,user_id));
+create table if not exists public.user_settings(user_id uuid primary key references auth.users(id) on delete cascade,private_account boolean default false,online_status boolean default true,last_seen boolean default true,read_receipts boolean default true,typing_indicator boolean default true,push_notifications boolean default true,updated_at timestamptz default now());
+create index if not exists idx_messages_conversation on public.messages(conversation_id,created_at);
+create index if not exists idx_follows_following on public.follows(following_id);
+create index if not exists idx_follows_follower on public.follows(follower_id);
+create index if not exists idx_story_views_story on public.story_views(story_id);
+create index if not exists idx_call_logs_users on public.call_logs(caller_id,receiver_id,started_at);
+alter table public.message_media enable row level security;
+alter table public.story_views enable row level security;
+alter table public.story_reactions enable row level security;
+alter table public.user_settings enable row level security;
+alter table public.call_logs enable row level security;
+do $$ begin
+if not exists(select 1 from pg_policies where policyname='message media access' and tablename='message_media') then create policy "message media access" on public.message_media for all using(auth.uid() in(select sender_id from public.messages where id=message_id)); end if;
+if not exists(select 1 from pg_policies where policyname='own story views' and tablename='story_views') then create policy "own story views" on public.story_views for all using(auth.uid()=viewer_id); end if;
+if not exists(select 1 from pg_policies where policyname='own story reactions' and tablename='story_reactions') then create policy "own story reactions" on public.story_reactions for all using(auth.uid()=user_id); end if;
+if not exists(select 1 from pg_policies where policyname='own settings' and tablename='user_settings') then create policy "own settings" on public.user_settings for all using(auth.uid()=user_id) with check(auth.uid()=user_id); end if;
+if not exists(select 1 from pg_policies where policyname='own calls' and tablename='call_logs') then create policy "own calls" on public.call_logs for all using(auth.uid()=caller_id or auth.uid()=receiver_id); end if;
+end $$;
