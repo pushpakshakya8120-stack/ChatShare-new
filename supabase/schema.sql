@@ -215,10 +215,10 @@ drop policy if exists messages_update on messages;
 create policy messages_update on messages for update to authenticated using (sender_id = auth.uid());
 
 drop policy if exists notifications_select on notifications;
-create policy notifications_select on notifications for select to authenticated using (auth.uid() = user_id = auth.uid());
+create policy notifications_select on notifications for select to authenticated using (auth.uid() = user_id);
 
 drop policy if exists notifications_update on notifications;
-create policy notifications_update on notifications for update to authenticated using (auth.uid() = user_id = auth.uid());
+create policy notifications_update on notifications for update to authenticated using (auth.uid() = user_id);
 
 drop policy if exists stories_select on stories;
 create policy stories_select on stories for select to authenticated using (expires_at > now());
